@@ -79,6 +79,7 @@ def main():
     assert "Success" in adb("install","-r",str(staged))
     with socket.socket() as s:s.bind(("127.0.0.1",0));port=s.getsockname()[1]
     env={**os.environ,"SOULBAND_DB":str(ROOT/"tests/.data"/("android-ui-"+uuid.uuid4().hex+".sqlite3"))}
+    env["SOULBAND_INITIAL_MODE"] = "demo"
     secure=os.getenv("SOULBAND_ANDROID_TLS")=="1"
     command=[sys.executable,"-m","uvicorn","app:app","--host","127.0.0.1","--port",str(port)]
     if secure: command += ["--ssl-keyfile","data/tls/server.key","--ssl-certfile","data/tls/server.crt"]

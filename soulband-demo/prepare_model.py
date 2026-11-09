@@ -4,13 +4,24 @@ import json
 import os
 from pathlib import Path
 import shutil
+import ssl
 import subprocess
 import time
 import urllib.request
 import zipfile
 
+import certifi
+
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT.parent / "output" / "runtime" / "ollama"
+
+
+def open_download(url, timeout=30):
+    # Keep system/enterprise roots, and supplement Anaconda's default CA store.
+    # Apply the same verified context to GitHub's redirected release assets.
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return urllib.request.urlopen(url, timeout=timeout, context=context)
 
 
 def request(url, data=None, timeout=30):
@@ -29,16 +40,17 @@ def ensure_service():
         RUNTIME.mkdir(parents=True, exist_ok=True)
         archive = RUNTIME / "ollama-windows-amd64.zip"
         # Resolve the version first so archive and checksum cannot come from different releases.
-        with urllib.request.urlopen("https://github.com/ollama/ollama/releases/latest", timeout=30) as response:
+        with open_download("https://github.com/ollama/ollama/releases/latest", timeout=30) as response:
             version = response.geturl().rstrip("/").rsplit("/", 1)[-1]
         if not version.startswith("v"):
             raise RuntimeError("Cannot resolve official Ollama release")
         base = f"https://github.com/ollama/ollama/releases/download/{version}/"
-        checksums = urllib.request.urlopen(base + "sha256sum.txt", timeout=30).read().decode()
+        with open_download(base + "sha256sum.txt", timeout=30) as response:
+            checksums = response.read().decode()
         expected = next(line.split()[0] for line in checksums.splitlines() if line.split()[-1].lstrip("*./") == archive.name)
         if not archive.is_file() or hashlib.file_digest(archive.open("rb"), "sha256").hexdigest() != expected:
             print("Downloading official Ollama", version, flush=True)
-            with urllib.request.urlopen(base + archive.name, timeout=60) as source, archive.open("wb") as target:
+            with open_download(base + archive.name, timeout=60) as source, archive.open("wb") as target:
                 done = 0
                 while block := source.read(4 * 1024 * 1024):
                     target.write(block)

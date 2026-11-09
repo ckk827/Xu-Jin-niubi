@@ -17,6 +17,7 @@ import storage as db
 class MobileTests(unittest.TestCase):
     def setUp(self):
         db.DB_PATH=Path(__file__).parent/'.data'/('mobile-'+uuid.uuid4().hex+'.sqlite3')
+        db.mutate(lambda state: state.update(mode="demo", model="qwen2.5:7b", model_configured=True))
         self.client=TestClient(app.app,client=('127.0.0.1',51000))
         self.installation=str(uuid.uuid4())
 

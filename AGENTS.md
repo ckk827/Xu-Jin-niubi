@@ -13,7 +13,7 @@
 
 - `soulband-demo/`：Python 宿主服务、Windows Qt 入口和手机适配网页。
 - `soulband-android/`：Kotlin 原生业务、采集、配对与提醒；v0.4 已补齐业务入口，iQOO 真机待测。
-- `开始测试_宿伴_v0.4_2026-11-08.md`：新交付启动与手工验收入口；`output/release-2026-11-08/REPORT.md` 为本轮证据索引。
+- `开始测试_宿伴_v0.5_2026-11-08.md`：当前交付启动与手工验收入口；v0.4 说明保留在原文件。`output/release-2026-11-08/REPORT.md` 为本轮证据索引（构建产物不在仓库）。
 - `output/windows-v0.4.0-tls/Soulband-Windows/`：成员客户端 exe 与依赖，分发须复制整个文件夹；源码仓库不包含构建产物。
 - `docs/decisions-soulband.md`：按编号保留的决策、历史场景及当前待定事项。
 - `soulband-demo/README.md`：当前启动入口与检查命令。

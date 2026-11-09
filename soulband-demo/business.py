@@ -79,11 +79,17 @@ class NeedSave(NeedInput):
 
 @router.post("/needs")
 def save_need(body: NeedSave, x_member_id: str = Header(default="m1")):
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(400, "请输入具体诉求")
+    if body.visibility == "private":
+        # Private cards never enter the shared blob the model, exports or diffs can see.
+        require_member(db.read(), x_member_id)
+        return db.save_private_need(x_member_id, text)
+
     def save(state):
         require_member(state, x_member_id)
-        value = {"id": uid("r"), "member_id": x_member_id, "text": body.text.strip(), "visibility": body.visibility}
-        if not value["text"]:
-            raise HTTPException(400, "请输入具体诉求")
+        value = {"id": uid("r"), "member_id": x_member_id, "text": text, "visibility": "public"}
         state["demands"].append(value)
         return value
     return db.mutate(save)
@@ -146,6 +152,8 @@ def revoke_request(x_member_id: str = Header(default="m1")):
         require_member(state, x_member_id)
         active = engine.active_proposal(sensing.prepare(state))
         if not active:
+            if any(p["status"] == "expired" for p in state["proposals"]):
+                raise HTTPException(409, "公约已到期，无需撤销；可直接添加成员或生成新版本")
             raise HTTPException(409, "没有生效公约")
         active.setdefault("revoke_approvals", [])
         # active_proposal is a projection; mutate only the persisted version.
@@ -309,7 +317,7 @@ async def suggest(identity: str):
             raise HTTPException(409, "公约已变化，请重新整理建议")
         value = item(state, "negotiations", identity)
         value["suggestion"] = output.reply
-        value["suggestion_source"] = "演示模板" if snapshot["mode"] == "demo" else "Ollama"
+        value["suggestion_source"] = "演示模板" if snapshot["mode"] == "demo" else engine.model_connection.label(snapshot)
         return value
     return db.mutate(save)
 

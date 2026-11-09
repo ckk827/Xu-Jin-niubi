@@ -105,6 +105,12 @@ def delivered(identity: str, body: Delivery, x_member_id: str = Header(default="
 async def models():
     import os
     import httpx
+    state = db.read()
+    if state["mode"] == "external":
+        return {"available": None, "models": [state["model"]], "provider": "external",
+                "message": "已配置外部模型；请在宿主模型连接中测试实际可用性"}
+    if state["mode"] != "ollama":
+        return {"available": False, "models": [], "message": "尚未选择真实模型"}
     try:
         async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
             response = await client.get(os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/") + "/api/tags")

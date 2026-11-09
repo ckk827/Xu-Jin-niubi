@@ -15,8 +15,6 @@ foreach ($secureKey in @('data\tls\ca.key', 'data\tls\server.key')) {
     & icacls.exe $secureKey /inheritance:r /grant:r "${secureUser}:(F)" '*S-1-5-18:(F)' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Cannot protect TLS private key.' }
 }
-& $securePython prepare_model.py
-if ($LASTEXITCODE -ne 0) { throw 'Real model setup failed.' }
 & $securePython configure_test.py
 if ($LASTEXITCODE -ne 0) { throw 'Database preparation failed.' }
 Write-Host 'Soulband HTTPS host. Keep this window open. Do not share data/tls/*.key.'

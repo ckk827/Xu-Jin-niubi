@@ -16,6 +16,7 @@ ROOT=Path(__file__).resolve().parents[1]
 def main():
     with socket.socket() as sock: sock.bind(("127.0.0.1",0));port=sock.getsockname()[1]
     env={**os.environ,"SOULBAND_DB":str(ROOT/"tests/.data"/("tls-"+uuid.uuid4().hex+".sqlite3"))}
+    env["SOULBAND_INITIAL_MODE"] = "demo"
     process=subprocess.Popen([sys.executable,"-m","uvicorn","app:app","--host","127.0.0.1","--port",str(port),"--ssl-certfile","data/tls/server.crt","--ssl-keyfile","data/tls/server.key"],cwd=ROOT,env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW)
     context=ssl.create_default_context(cafile=str(ROOT/"data/tls/soulband-ca.crt"))
     url=f"https://127.0.0.1:{port}/api/health"

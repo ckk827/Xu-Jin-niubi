@@ -70,7 +70,12 @@ class BusinessActivity : Activity() {
         scroll.addView(root); setContentView(scroll)
         scroll.setOnApplyWindowInsetsListener { _, inset -> root.setPadding(dp(20), dp(20) + inset.systemWindowInsetTop, dp(20), dp(24) + inset.systemWindowInsetBottom); inset }
         heading("${name(owner)}的寝室 · $page")
-        note(if (state.optString("mode") == "demo") "演示模拟 · 生成与判断不是真实大模型" else "Ollama · 真实模型模式（调用失败不会改用模拟）")
+        note(when (state.optString("mode")) {
+            "demo" -> "演示模拟 · 生成与判断不是真实大模型"
+            "ollama" -> "Ollama · 真实模型模式（调用失败不会改用模拟）"
+            "external" -> "外部 API · 真实模型模式（数据会发送给所选服务商）"
+            else -> "等待宿主在本机选择本地模型或外部 API"
+        })
         val tabs = Spinner(this).apply {
             val items = listOf("概览", "诉求与公约", "临时安排", "反馈协商", "公共事务", "模型助手", "私密表达")
             adapter = ArrayAdapter(this@BusinessActivity, android.R.layout.simple_spinner_dropdown_item, items)
@@ -128,7 +133,22 @@ class BusinessActivity : Activity() {
         val versions = objects(array("proposals"))
         versions.reversed().forEach { p ->
             heading("v${p.getInt("version")} · ${p.getString("title")} · ${recordStatus(p.getString("status"))}")
-            objects(p.getJSONArray("clauses")).forEach { note("${it.getString("title")}\n${it.getString("text")}\n${it.optString("start", "")} — ${it.optString("end", "")}") }
+            objects(p.getJSONArray("clauses")).forEach { c ->
+                note("${c.getString("title")}\n${c.getString("text")}\n${c.optString("start", "")} — ${c.optString("end", "")}")
+                if (c.getString("kind") == "quiet") {
+                    val scope = c.optJSONObject("execution_scope")
+                    val issue = scope?.optString("issue").orEmpty()
+                    if (issue.isNotEmpty()) note("仅文字约定，不自动提醒：$issue")
+                    else {
+                        val days = scope?.optJSONArray("weekdays") ?: c.optJSONArray("weekdays") ?: JSONArray((0..6).toList())
+                        val people = scope?.optJSONArray("member_ids") ?: c.optJSONArray("member_ids") ?: JSONArray()
+                        val dayText = (0 until days.length()).joinToString("、") { listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")[days.getInt(it)] }
+                        val peopleText = if (people.length() == 0) "全体成员" else (0 until people.length()).joinToString("、") { name(people.getString(it)) }
+                        note("适用：$dayText\n成员：$peopleText")
+                        note("日期：${if (c.isNull("starts_on")) "不限" else c.optString("starts_on", "不限")} 至 ${if (c.isNull("ends_on")) "不限" else c.optString("ends_on", "不限")}；跨夜按开始日")
+                    }
+                }
+            }
             note("已确认：${p.getJSONArray("approvals")}\n待协商：${p.getJSONArray("conflicts")}")
             if (p == versions.lastOrNull()) {
                 button("本人确认此版本 v${p.getInt("version")}") { mutate("/proposals/${p.getString("id")}/approve") }
@@ -140,13 +160,48 @@ class BusinessActivity : Activity() {
     private fun revise(p: JSONObject) {
         val clauses = objects(p.getJSONArray("clauses"))
         val fields = mutableListOf("公约标题" to p.getString("title"))
-        clauses.forEach { c -> fields.add("条款：${c.getString("title")}" to c.getString("text")); if (c.getString("kind") == "quiet") { fields.add("开始 HH:MM" to c.getString("start")); fields.add("结束 HH:MM" to c.getString("end")) } }
+        val weekdays = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+        clauses.forEach { c ->
+            fields.add("条款：${c.getString("title")}" to c.getString("text"))
+            if (c.getString("kind") == "quiet") {
+                fields.add("开始 HH:MM" to c.getString("start")); fields.add("结束 HH:MM" to c.getString("end"))
+                val days = c.optJSONArray("weekdays") ?: JSONArray((0..6).toList())
+                fields.add("适用星期（周一等，用逗号分隔）" to (0 until days.length()).joinToString(",") { weekdays[days.getInt(it)] })
+                val people = c.optJSONArray("member_ids") ?: JSONArray()
+                fields.add("适用成员昵称（逗号分隔，空为全体）" to (0 until people.length()).joinToString(",") { name(people.getString(it)) })
+                fields.add("开始日期 YYYY-MM-DD（可空）" to if (c.isNull("starts_on")) "" else c.optString("starts_on"))
+                fields.add("结束日期 YYYY-MM-DD（可空）" to if (c.isNull("ends_on")) "" else c.optString("ends_on"))
+                fields.add("执行方式（自动 / 仅文字）" to if (c.optString("automation") == "manual") "仅文字" else "自动")
+                val exceptions = c.optJSONArray("exceptions") ?: JSONArray()
+                fields.add("其它例外（每行一条，填写后不自动提醒）" to (0 until exceptions.length()).joinToString("\n") { exceptions.getString(it) })
+            }
+        }
         fields.add("截止时间 YYYY-MM-DDTHH:MM（可留空）" to if (p.isNull("valid_until")) "" else p.optString("valid_until"))
         fields.add("待解决冲突（每行一条，解决后才清空）" to (0 until p.getJSONArray("conflicts").length()).joinToString("\n") { p.getJSONArray("conflicts").getString(it) })
         form("修订仅生成待审核新版本", fields) { values ->
             var i = 1
             val edited = JSONArray()
-            clauses.forEach { old -> val c = JSONObject(old.toString()); c.put("text", values[i++]); if (c.getString("kind") == "quiet") { c.put("start", values[i++]); c.put("end", values[i++]) }; edited.put(c) }
+            val separator = Regex("[,，、\\s]+")
+            for (old in clauses) {
+                val c = JSONObject(old.toString()); c.remove("execution_scope"); c.put("text", values[i++])
+                if (c.getString("kind") == "quiet") {
+                    c.put("start", values[i++]); c.put("end", values[i++])
+                    val days = values[i++].split(separator).filter { it.isNotBlank() }
+                    if (days.any { it !in weekdays }) { toast("请使用周一至周日填写星期"); return@form }
+                    c.put("weekdays", JSONArray(days.map { weekdays.indexOf(it) }))
+                    val people = values[i++].split(separator).filter { it.isNotBlank() }
+                    val members = objects(array("members"))
+                    if (people.any { nickname -> members.count { it.getString("name") == nickname } != 1 }) { toast("成员昵称不存在或不唯一，请检查"); return@form }
+                    c.put("member_ids", JSONArray(people.map { nickname -> members.first { it.getString("name") == nickname }.getString("id") }))
+                    c.put("starts_on", values[i++].ifBlank { null } ?: JSONObject.NULL)
+                    c.put("ends_on", values[i++].ifBlank { null } ?: JSONObject.NULL)
+                    val automation = values[i++]
+                    if (automation !in listOf("自动", "仅文字")) { toast("执行方式请填写自动或仅文字"); return@form }
+                    c.put("automation", if (automation == "自动") "automatic" else "manual")
+                    c.put("exceptions", JSONArray(values[i++].lines().filter { it.isNotBlank() }))
+                }
+                edited.put(c)
+            }
             mutate("/proposals/${p.getString("id")}/revise", json("title" to values[0], "valid_until" to values[i].ifBlank { null }, "clauses" to edited, "conflicts" to JSONArray(values.last().lines().filter { it.isNotBlank() })))
         }
     }
@@ -221,6 +276,7 @@ class BusinessActivity : Activity() {
     }
     private fun privateHelp() {
         note("原文仅用于本次整理，不保存到业务数据库；模型会收到输入。私密结果不会自动发送。离开页面清除本地显示。")
+        if (state.optString("mode") == "external") note("当前使用外部 API：本次表达会发送给宿主选择的服务商。")
         button("整理我的私密表达") { choose("语气", listOf("gentle" to "温和", "friendly" to "友好", "direct" to "直接")) { style ->
             form("私密表达", listOf("内容" to "")) { values -> execute({ call("/private", json("text" to values[0], "style" to style)) }) { privateReply = it.getString("reply"); render() } }
         } }

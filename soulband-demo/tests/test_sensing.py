@@ -23,6 +23,7 @@ def sample(idle=3, locked=False, session_active=True):
 class SensingTests(unittest.TestCase):
     def setUp(self):
         db.DB_PATH = Path(__file__).parent / ".data" / ("sensing-" + uuid.uuid4().hex + ".sqlite3")
+        db.mutate(lambda state: state.update(mode="demo", model="qwen2.5:7b", model_configured=True))
         app.runtime.update(busy=False, error=None, last_signature=None)
         self.client = TestClient(app.app, client=("127.0.0.1", 51000))
 

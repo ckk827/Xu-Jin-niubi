@@ -15,8 +15,10 @@ from policy import (
     DEFAULT_ACTIVE_SECONDS,
     DEFAULT_REST_SECONDS,
 )
+import storage as db
+import quiet_rules
 LIVE_SOURCE = "windows_live"
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 
 def defaults():
@@ -138,8 +140,27 @@ def prepare(state, now=None):
     return state
 
 
+def window_phase(state):
+    """Which approved quiet windows are open right now, and which cycle they belong to.
+
+    The phase only changes when a window opens, closes, or the covenant changes.
+    The minute hand must never trigger inference by itself.
+    """
+    state = prepare(state)
+    active = next((p for p in state["proposals"] if p["id"] == state["active_id"] and p["status"] == "active"), None)
+    phase = []
+    for clause in (active["clauses"] if active else []):
+        if clause.get("kind") != "quiet" or not clause.get("start") or not clause.get("end"):
+            continue
+        inside, cycle = quiet_rules.window(state, clause)
+        resumed = quiet_rules.resumed_at(state, clause)
+        phase.append({"clause_id": clause["id"], "inside": inside,
+                      "cycle": cycle, "resumed_at": resumed.isoformat() if resumed else None})
+    return phase
+
+
 def analysis_key(state):
-    """Only semantic context invalidates inference; harmless heartbeats do not."""
+    """Only semantic context invalidates inference; minutes and heartbeats do not."""
     state = prepare(state)
     active = next((p for p in state["proposals"] if p["id"] == state["active_id"]), None)
     members = []
@@ -150,8 +171,10 @@ def analysis_key(state):
         members.append({"id": person["id"], "manual": manual,
                         "devices": [{k:d.get(k) for k in ("id", "source", "signal", "locked", "error")}
                                     for d in person["devices"] if d.get("participating", True)]})
-    payload = json.dumps({"members": members, "clock": state["clock"], "active": active,
-                       "mode": state["mode"], "model": state["model"], "adjustments": state.get("adjustments", []),
-                       "reminders": [{k:r.get(k) for k in ("id", "target", "cycle", "kind", "version")}
-                                     for r in state["reminders"]], "feedbacks": state["feedbacks"]}, sort_keys=True)
+    # No wall clock and no reminder list: entering a window is a phase change,
+    # while the minute-by-minute clock and already-sent reminders are not.
+    payload = json.dumps({"members": members, "windows": window_phase(state), "active": active,
+                       "demands": state["demands"], "mode": state["mode"], "model": state["model"],
+                       "model_connection_revision": state.get("model_connection_revision", 0),
+                       "adjustments": state.get("adjustments", []), "feedbacks": state["feedbacks"]}, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()

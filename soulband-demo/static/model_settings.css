@@ -1,0 +1,14 @@
+.model-onboarding { max-width: 760px; margin: 60px auto; padding: 0 22px; }
+.model-onboarding h1 { margin-top: 14px; }
+.model-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.model-setup-log { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.model-panel { min-width: 0; }
+.model-source-choices { display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:20px 0; }
+.model-source-choices button { border:1px solid #e4dcef;border-radius:14px;padding:18px;background:#fff;text-align:left;color:var(--ink); }
+.model-source-choices button[aria-pressed="true"] { border:2px solid var(--purple);padding:17px;background:var(--soft); }
+.model-source-choices strong { display:block;margin:10px 0 6px;font-size:16px; }
+.model-source-choices small,.model-field-help { display:block;color:#83758e;line-height:1.7;font-size:12px; }
+.model-field-help { margin-top:8px; }
+@media (max-width:700px) { .model-connection-shortcut { display:none; } .nav button { min-width:0;flex:1; } .nav button span { font-size:8px;white-space:nowrap; } }
+@media (max-width:500px) { .model-source-choices { grid-template-columns:1fr; } }
+@media (max-width: 600px) { .model-onboarding { margin: 28px auto; } }

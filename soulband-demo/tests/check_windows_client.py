@@ -16,6 +16,7 @@ ROOT=Path(__file__).resolve().parents[1]
 def main():
     with socket.socket() as s:s.bind(("127.0.0.1",0));port=s.getsockname()[1]
     env={**os.environ,"SOULBAND_DB":str(ROOT/"tests/.data"/("windows-member-"+uuid.uuid4().hex+".sqlite3"))}
+    env["SOULBAND_INITIAL_MODE"] = "demo"
     secure=os.getenv("SOULBAND_WINDOWS_TLS")=="1"
     server_command=[sys.executable,"-m","uvicorn","app:app","--host","127.0.0.1","--port",str(port)]
     if secure: server_command += ["--ssl-keyfile","data/tls/server.key","--ssl-certfile","data/tls/server.crt"]

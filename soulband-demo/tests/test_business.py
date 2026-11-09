@@ -16,6 +16,7 @@ import storage as db
 class BusinessTests(unittest.TestCase):
     def setUp(self):
         db.DB_PATH = Path(__file__).parent / ".data" / ("business-" + uuid.uuid4().hex + ".sqlite3")
+        db.mutate(lambda state: state.update(mode="demo", model="qwen2.5:7b", model_configured=True))
         self.local = TestClient(app.app, client=("127.0.0.1", 3000))
         self.remote = TestClient(app.app, client=("192.0.2.1", 3001))
 

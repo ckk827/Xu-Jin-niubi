@@ -17,6 +17,7 @@ def main():
     with socket.socket() as sock:
         sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
     env=os.environ.copy()
+    env["SOULBAND_INITIAL_MODE"] = "demo"
     env['SOULBAND_DB']=str(ROOT/'tests'/'.data'/('mobile-ui-'+uuid.uuid4().hex+'.sqlite3'))
     server=subprocess.Popen([sys.executable,'-m','uvicorn','app:app','--host','127.0.0.1','--port',str(port)],cwd=ROOT,env=env,
                             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW)

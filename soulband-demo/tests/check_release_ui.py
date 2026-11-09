@@ -17,6 +17,7 @@ def main():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]
     env = {**os.environ, "SOULBAND_DB": str(ROOT / "tests/.data" / ("release-ui-" + uuid.uuid4().hex + ".sqlite3"))}
+    env["SOULBAND_INITIAL_MODE"] = "demo"
     process = subprocess.Popen([sys.executable, "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", str(port)], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     base = f"http://127.0.0.1:{port}"
     shots = ROOT / "screenshots/release-0.4"; shots.mkdir(parents=True, exist_ok=True)

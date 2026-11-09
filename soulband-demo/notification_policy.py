@@ -1,6 +1,7 @@
 """Messages remain history; expired authorization must not produce a later popup."""
 import engine
 import sensing
+import quiet_rules
 
 
 def deliverable(state, reminder):
@@ -12,4 +13,5 @@ def deliverable(state, reminder):
     if not clause:
         return False
     inside, cycle = engine.quiet_window(context, clause)
-    return inside and cycle == reminder.get("cycle")
+    eligible = quiet_rules.scope(clause, [m["id"] for m in state["members"]])["member_ids"]
+    return inside and reminder.get("target") in eligible and cycle == reminder.get("cycle")

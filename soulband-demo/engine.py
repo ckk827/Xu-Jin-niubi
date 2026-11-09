@@ -11,6 +11,9 @@ from typing import Literal
 
 import httpx
 import sensing
+import storage as db
+import quiet_rules
+import model_connection
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -22,9 +25,26 @@ class Clause(BaseModel):
     start: str | None = None
     end: str | None = None
     sources: list[str] = Field(default_factory=list)
+    weekdays: list[int] = Field(default_factory=lambda: list(range(7)), max_length=7)
+    member_ids: list[str] = Field(default_factory=list, max_length=6)
+    starts_on: str | None = None
+    ends_on: str | None = None
+    automation: Literal["automatic", "manual"] = "automatic"
+    exceptions: list[str] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
     def validate_times(self):
+        if len(set(self.weekdays)) != len(self.weekdays) or any(d not in range(7) for d in self.weekdays):
+            raise ValueError("星期须为不重复的 0（周一）至 6（周日）")
+        if len(set(self.member_ids)) != len(self.member_ids):
+            raise ValueError("适用成员不能重复")
+        for value in (self.starts_on, self.ends_on):
+            if value:
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                    raise ValueError("适用日期须为 YYYY-MM-DD")
+                datetime.strptime(value, "%Y-%m-%d")
+        if self.starts_on and self.ends_on and self.starts_on > self.ends_on:
+            raise ValueError("结束日期不能早于开始日期")
         if self.kind == "quiet":
             for value in (self.start, self.end):
                 if value is None or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
@@ -106,14 +126,14 @@ async def record_request(state, proposal):
 
 
 async def prepare_need(state, text):
-    if state["mode"] == "ollama":
+    if state["mode"] != "demo":
         return await ollama(state, "整理诉求卡，不增加原文没有的事实、时段或承诺。缺具体标准时列出需要本人补充的问题。", {"text": text}, NeedCard)
     category = "quiet" if any(w in text for w in ("安静", "休息", "唱歌")) else "duties" if any(w in text for w in ("卫生", "值日", "分工")) else "other"
     return NeedCard(text=text, category=category, questions=["请检查具体时间、允许活动与例外；确认后再选择公开范围。"])
 
 
 async def plan_tool(state, text, owner):
-    if state["mode"] == "ollama":
+    if state["mode"] != "demo":
         return await ollama(state, "选择一个受控工具：covenant 查公约，tasks 查任务，bills 查账单，complete_task 建议完成本人某项任务。不能直接修改状态。只允许引用真实任务 ID。", {"question": text, "owner": owner, "tasks": state["tasks"]}, ToolPlan)
     if "完成" in text:
         own = [t for t in state["tasks"] if t["owner"] == owner and not t["done"] and (t["id"] in text or t["title"] in text)]
@@ -123,13 +143,13 @@ async def plan_tool(state, text, owner):
 
 
 async def explain_tool(state, text, tool, data):
-    if state["mode"] == "ollama":
+    if state["mode"] != "demo":
         return (await ollama(state, "仅依据工具真实返回结果回答问题。说明生效状态；草案不是公约，不得声称已执行任何操作。", {"question": text, "tool": tool, "result": data}, PrivateReply)).reply
     return "演示工具已检索正式记录（非模型回答）：\n" + json.dumps(data, ensure_ascii=False, indent=2)
 
 
 async def negotiation_suggestion(state, negotiation):
-    if state["mode"] == "ollama":
+    if state["mode"] != "demo":
         return await ollama(state, "整理再次协商问题、当前相关公约、可讨论的调整建议与需要成员回答的问题。建议尚未生效，不推断谁违规，不承诺匿名，不直接改公约。", {"issue": negotiation, "covenant": active_proposal(sensing.prepare(state))}, PrivateReply)
     return PrivateReply(reply="演示建议：一起核对现有公约的时间、活动边界与例外；讨论是否需要临时安排或修订。此建议尚未生效，修订仍须全员重新确认。")
 
@@ -142,23 +162,11 @@ def active_proposal(state):
 
 
 def business_now(state):
-    return datetime.fromisoformat(state["clock"]["date"] + "T" + state["clock"]["time"])
+    return db.business_now(state)
 
 
 def quiet_window(state, clause):
-    """A midnight-spanning quiet period belongs to the day it starts."""
-    current = business_now(state)
-    start, end, now = clause["start"], clause["end"], state["clock"]["time"]
-    if start < end:
-        inside = start <= now < end
-        day = current.date()
-    else:
-        inside = now >= start or now < end
-        day = (current - timedelta(days=1)).date() if now < end else current.date()
-    paused = any(a["status"] == "approved" and a["version_id"] == state["active_id"] and a["clause_id"] == clause["id"]
-                 and datetime.fromisoformat(a["starts"]) <= current < datetime.fromisoformat(a["ends"])
-                 for a in state.get("adjustments", []))
-    return inside and not paused, f"{day.isoformat()}:{start}-{end}"
+    return quiet_rules.window(state, clause)
 
 
 def manual_state(member):
@@ -197,6 +205,10 @@ signal=idle 表示设备已有达到观察阈值的持续无操作摘要，区�
 
 
 async def ollama(state, task, payload, schema, *, system_text=None):
+    if state["mode"] == "unconfigured":
+        raise RuntimeError("请先在模型连接中选择本地模型或外部 API")
+    if state["mode"] == "external":
+        return await external_model(state, task, payload, schema, system_text=system_text)
     base = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=4), trust_env=False) as client:
@@ -214,6 +226,31 @@ async def ollama(state, task, payload, schema, *, system_text=None):
                            f"（{type(exc).__name__}）") from exc
 
 
+async def external_model(state, task, payload, schema, *, system_text=None, api_key=None):
+    try:
+        base = model_connection.normalize_base(state.get("api_base_url", ""))
+        key = api_key or model_connection.saved_key(base)
+        if not key:
+            raise RuntimeError("尚未配置外部 API Key，请在宿主本机的模型连接中填写")
+        system = (SYSTEM if system_text is None else system_text) + "\nReturn a JSON object matching this schema:\n" + json.dumps(schema.model_json_schema(), ensure_ascii=False)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10), follow_redirects=False) as client:
+            response = await client.post(base + "/chat/completions",
+                headers={"Authorization": "Bearer " + key}, json={
+                    "model": state["model"], "stream": False, "temperature": 0,
+                    "response_format": {"type": "json_object"},
+                    "messages": [{"role": "system", "content": system},
+                                 {"role": "user", "content": task + "\n数据：" + json.dumps(payload, ensure_ascii=False)}]})
+            response.raise_for_status()
+            return schema.model_validate_json(response.json()["choices"][0]["message"]["content"])
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        hint = {401: "API Key 无效", 403: "没有模型访问权限", 404: "请核对 API 地址和模型名称",
+                429: "请求限流或额度不足"}.get(code, "请核对服务地址、模型及服务状态")
+        raise RuntimeError(f"外部模型调用失败（HTTP {code}）：{hint}；未改用模拟结果") from None
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError):
+        raise RuntimeError("外部模型连接或 JSON 输出校验失败；请核对网络及服务的 OpenAI 兼容能力，未改用模拟结果") from None
+
+
 def demo_proposal(state):
     """Conservative sample generator: conflicting or missing times remain unresolved."""
     demands = state["demands"]
@@ -228,8 +265,9 @@ def demo_proposal(state):
             conflicts.append("静音开始与结束时间相同，请先明确时间范围。")
         else:
             source_ids = [d["id"] for d in demands if re.search(r"\d[:：]\d", d["text"])]
+            original = "\n".join(d["text"] for d in demands if d["id"] in source_ids)
             clauses.append(Clause(id="quiet", title="共同静音时段", kind="quiet", start=start, end=end,
-                                  text=f"每日 {start} 至 {end} 保持安静。具体允许活动和例外请成员审核补充。",
+                                  text=f"{start} 至 {end} 保持安静。以下原始时间诉求及范围需一并审核：\n{original}",
                                   sources=source_ids))
     elif len(time_pairs) > 1:
         conflicts.append("收集到不同静音时间范围，需要成员协商一致；演示生成器不会自动选折中时间。")
@@ -252,7 +290,9 @@ async def generate(state):
 2. 相同静音时间互相兼容。戴耳机继续使用电脑与保持安静兼容，不构成冲突。不反复提醒也与安静要求兼容。
 3. conflicts 仅列真实、具体、尚未解决的互斥要求或缺少的必要时间。没有冲突就 []，不能将建议、未知细节、未发现冲突、未重复提及的需求写成冲突。
 4. 卫生标准与费用按原诉求保留；不得补造投票制度、保证、纪律或成员未表达的承诺。
-5. 每条必须有非空 sources 并引用输入中的需求 id，覆盖全部公开诉求。不增加无来源的通用条款。"""
+5. 每条必须有非空 sources 并引用输入中的需求 id，覆盖全部公开诉求。不增加无来源的通用条款。
+6. quiet 条款必须保留正文，并提取适用范围：weekdays 为 0=周一至6=周日的列表；member_ids 为适用成员ID（空列表表示全体）；starts_on/ends_on 为起始日的 YYYY-MM-DD 日期边界（可空）。跨夜按开始日归属。
+7. 无法结构化的例外原文放 exceptions，automation=manual，仅保留文字约定；不要用自动提醒扩大约定范围。普通每日全员条款 automation=automatic、exceptions=[]。"""
     output = await ollama(state, task, payload, Proposal)
     errors = proposal_errors(state, output)
     if errors:
@@ -271,6 +311,19 @@ def proposal_errors(state, output):
     if sources - {s for c in output.clauses for s in c.sources}:
         errors.append("存在未覆盖的公开诉求")
     for clause in output.clauses:
+        if not set(clause.member_ids) <= {m["id"] for m in state["members"]}:
+            errors.append("条款适用成员不存在")
+        if clause.kind == "quiet" and clause.automation == "automatic" and not clause.exceptions:
+            members = [m["id"] for m in state["members"]]
+            actual = quiet_rules.scope(clause.model_dump(), members)
+            for demand in state["demands"]:
+                if demand["id"] not in clause.sources:
+                    continue
+                original = quiet_rules.scope({**clause.model_dump(), "text": demand["text"]}, members)
+                if original["issue"] and not actual["issue"]:
+                    errors.append("原诉求含未落实的日期、范围或例外，请保留原文并设为仅文字约定")
+                if not set(actual["weekdays"]) <= set(original["weekdays"]):
+                    errors.append("静音星期范围扩大了原诉求的适用范围")
         if clause.kind == "general" and any(word in clause.text for word in ("静音", "保持安静", "安静时间")) and len(re.findall(r"\d{1,2}[:：]\d{2}", clause.text)) >= 2:
             errors.append("有具体静音时间的条款必须是 quiet 类型")
     if any("未发现" in c or "没有冲突" in c for c in output.conflicts):
@@ -287,7 +340,7 @@ def model_payload(state):
 
 
 async def analyze(state):
-    if state["mode"] == "ollama":
+    if state["mode"] != "demo":
         payload = model_payload(state)
         activities = await ollama(state, "Infer the coarse activity of EVERY member from their devices and valid manual state. "
                                   "Examples: devices [idle,idle] => status resting; [idle,active] => active; [idle,unknown] => unknown; [away,idle] => unknown; [] => unknown. "
@@ -301,6 +354,7 @@ async def analyze(state):
         validate_analysis(state, provisional)
         active = active_proposal(state)
         windows = [{"clause_id":c["id"], "cycle":quiet_window(state,c)[1],
+                    "clause": c, "eligible_members": quiet_rules.scope(c, [m["id"] for m in state["members"]])["member_ids"],
                     "already_reminded":sorted({r["target"] for r in state["reminders"] if r["cycle"] == quiet_window(state,c)[1]})}
                    for c in (active["clauses"] if active else []) if c["kind"] == "quiet" and quiet_window(state,c)[0]]
         plan = await ollama(state, "Determine gate FIRST, in this order: "
@@ -312,9 +366,12 @@ async def analyze(state):
                            "Send one reminder to each ACTIVE member only IF (1) at least one applicable_window exists, (2) at least one OTHER member is resting, "
                            "(3) that target has NOT been reminded in the SAME cycle according to reminder_history. Otherwise decisions=[]. "
                            "NEVER target resting or unknown members. There can be MULTIPLE unreminded ACTIVE members; include one Decision per such member, do not omit any. "
-                           "Use the actual clause_id from applicable_windows. Messages and summary must be Chinese. "
+                           "Use the actual clause_id from applicable_windows. Only target eligible_members of that clause, and require another resting eligible member. "
+                           "Read the FULL approved clause text, scope, dates and exceptions. Never extend its requirements. Messages and summary must be Chinese. "
                            "This is preventive: ask to mind the volume, do NOT claim detected noise or a violation.",
-                           {"inferred_states":activities.model_dump()["states"],
+                           {"clock": state["clock"], "active_covenant": active,
+                            "temporary_adjustments": state.get("adjustments", []),
+                            "inferred_states":activities.model_dump()["states"],
                             "active_members":[a.member_id for a in activities.states if a.status == "active"],
                             "possibly_resting_members":[a.member_id for a in activities.states if a.status == "resting"],
                             "applicable_windows":windows}, ReminderPlan,
@@ -328,10 +385,11 @@ async def analyze(state):
             if clause["kind"] != "quiet":
                 continue
             inside, cycle = quiet_window(state, clause)
-            if inside:
+            eligible = quiet_rules.scope(clause, [m["id"] for m in state["members"]])["member_ids"]
+            if inside and any(s.status == "resting" and s.member_id in eligible for s in states):
                 for member in states:
                     sent = any(r["target"] == member.member_id and r["cycle"] == cycle for r in state["reminders"])
-                    if member.status == "active" and not sent:
+                    if member.member_id in eligible and member.status == "active" and not sent:
                         decisions.append(Decision(clause_id=clause["id"], target=member.member_id,
                                                   message="现在是约定的静音时段，可能有室友正在休息，请留意音量。",
                                                   reason="有效静音公约 + 有人可能休息 + 本成员有活动 + 本时段未提醒"))
@@ -361,7 +419,7 @@ def validate_analysis(state, result):
 
 
 async def private_reply(state, text, style):
-    if state["mode"] == "ollama":
+    if state["mode"] != "demo":
         return (await ollama(state, "仅私下帮助用户整理表达，不发送任何消息，不增加未说过的事实。"
                             "返回一段用户可以自己修改后使用的话术。", {"text": text, "style": style}, PrivateReply)).reply
     prefix = {"gentle": "想和你商量一下：", "direct": "我想具体表达一下我的需要：", "friendly": "和你说个小事呀："}[style]

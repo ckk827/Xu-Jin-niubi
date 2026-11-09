@@ -20,6 +20,7 @@ import storage as db
 class DemoTests(unittest.TestCase):
     def setUp(self):
         db.DB_PATH = Path(__file__).parent / ".data" / (uuid.uuid4().hex + ".sqlite3")
+        db.mutate(lambda state: state.update(mode="demo", model="qwen2.5:7b", model_configured=True))
         app.runtime.update(busy=False, error=None, last_signature=None)
         self.client = TestClient(app.app)
 
@@ -131,7 +132,7 @@ class DemoTests(unittest.TestCase):
         original = engine.analyze
         async def changing(snapshot):
             result = await original(snapshot)
-            db.mutate(lambda state: state["clock"].update(time="15:00"))
+            db.mutate(lambda state: state["demands"].append({"id": "r-late", "member_id": "m1", "text": "判断期间新增的诉求", "visibility": "public"}))
             return result
         with patch("engine.analyze", changing):
             self.request("POST", "/analyze", expected=409)

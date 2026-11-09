@@ -6,6 +6,7 @@ import ssl
 from pathlib import Path
 import httpx
 from sensing import WindowsSampler, VERSION
+from qt_runtime import prepare_qt_runtime
 
 CA_FILE = Path(__file__).resolve().parent / "soulband-ca.crt"
 if not CA_FILE.exists():
@@ -29,6 +30,7 @@ def main():
     if args.smoke_test:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
+    prepare_qt_runtime()
     from PySide6.QtCore import QTimer, QUrl, QThread, Signal
     from PySide6.QtGui import QIcon, QPixmap, QColor
     from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLineEdit, QPushButton, QLabel, QCheckBox, QSystemTrayIcon, QMessageBox
@@ -47,7 +49,15 @@ def main():
     status = QLabel("未连接"); layout.addWidget(status)
     web = QWebEngineView()
     profile_builder = QWebEngineProfileBuilder()
-    if CA_FILE.exists(): profile_builder.setAdditionalTrustedCertificates(QSslCertificate.fromPath(str(CA_FILE)))
+    if CA_FILE.exists():
+        if not hasattr(profile_builder, "setAdditionalTrustedCertificates"):
+            QMessageBox.critical(window, "桌面依赖需要更新", "请在项目根目录执行：.\\.venv\\Scripts\\python.exe -m pip install -r soulband-demo/requirements.txt\n证书校验保持开启，更新后重新启动成员客户端。")
+            return 1
+        certificates = QSslCertificate.fromPath(str(CA_FILE))
+        if not certificates:
+            QMessageBox.critical(window, "证书不可用", "未能读取项目公有 CA，请重新准备证书并重建客户端。")
+            return 1
+        profile_builder.setAdditionalTrustedCertificates(certificates)
     profile = profile_builder.createProfile("", window)
     web.setPage(QWebEnginePage(profile, web)); layout.addWidget(web, 1)
     pix = QPixmap(32, 32); pix.fill(QColor("#7b65ce")); tray = QSystemTrayIcon(QIcon(pix), window); tray.setToolTip("宿伴 · 成员提醒"); tray.show()
