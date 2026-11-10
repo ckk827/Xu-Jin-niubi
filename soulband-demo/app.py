@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -39,8 +39,56 @@ from policy import MANUAL_STATE_LIFETIME_SECONDS
 
 ROOT = Path(__file__).resolve().parent
 INFERENCE_LOCK = asyncio.Lock()
-runtime = {"busy": False, "error": None, "last_signature": None, "last_analysis_at": 0.0,
-           "schedule_block_until": 0.0}
+runtime = {"busy": False, "busy_task": None, "busy_since": None, "error": None,
+           "last_signature": None, "last_analysis_at": 0.0, "schedule_block_until": 0.0}
+
+BUSY_LABELS = {"analysis": "判断寝室状态并安排提醒", "proposal": "综合需求生成公约草案"}
+# A manual request queues behind automatic inference instead of failing at once;
+# the ceiling keeps a stale lock from holding an HTTP request forever.
+INFERENCE_WAIT_SECONDS = 90.0
+
+
+def busy_seconds():
+    since = runtime.get("busy_since")
+    return int(max(0.0, time.time() - since)) if since else 0
+
+
+def busy_label():
+    return BUSY_LABELS.get(runtime.get("busy_task"), "处理模型任务")
+
+
+def busy_conflict():
+    """(409) Explain which task holds the model instead of a bare '稍候'."""
+    return HTTPException(409, f"宿主正在{busy_label()}（已 {busy_seconds()} 秒），"
+                              "请稍候再试；模型返回后按钮会自动恢复。")
+
+
+async def acquire_inference():
+    """Wait for the model slot; user actions queue instead of being rejected."""
+    if not INFERENCE_LOCK.locked():
+        await INFERENCE_LOCK.acquire()
+        return
+    try:
+        await asyncio.wait_for(INFERENCE_LOCK.acquire(), timeout=INFERENCE_WAIT_SECONDS)
+    except asyncio.TimeoutError:
+        raise busy_conflict() from None
+
+
+def live_view(raw):
+    """Small payload for incremental pollers: freshness without a full state."""
+    now = time.time()
+    devices = []
+    for person in raw["members"]:
+        for device in person["devices"]:
+            view = sensing.device_view(device, now)
+            devices.append({"member_id": person["id"], "device_id": device["id"],
+                            "signal": view.get("signal"), "stale": view.get("stale"),
+                            "locked": view.get("locked"), "idle_seconds": view.get("idle_seconds"),
+                            "error": view.get("error"), "source": view.get("source")})
+    config = raw.get("local_sensor", sensing.defaults())
+    return {"devices": devices, "runtime": {k: v for k, v in runtime.items() if k != "last_signature"},
+            "sensing": {"enabled": config.get("enabled"), "member_id": config.get("member_id"),
+                        "last_error": config.get("last_error")}}
 
 
 def _setup_logging():
@@ -88,13 +136,12 @@ def notify(state, target, clause, cycle, message, reason, source, kind="auto"):
 
 
 async def run_analysis(trigger="manual"):
-    if INFERENCE_LOCK.locked():
-        raise HTTPException(409, "已有模型任务进行中，请稍候")
-    async with INFERENCE_LOCK:
+    await acquire_inference()
+    try:
         snapshot = sensing.prepare(db.read())
         snapshot_key = sensing.analysis_key(snapshot)
         started = time.perf_counter()
-        runtime.update(busy=True, error=None)
+        runtime.update(busy=True, busy_task="analysis", busy_since=time.time(), error=None)
         source = model_connection.label(snapshot) + (" · " + snapshot["model"] if snapshot["mode"] != "demo" else "")
         try:
             result = await engine.analyze(snapshot)
@@ -154,6 +201,10 @@ async def run_analysis(trigger="manual"):
         finally:
             runtime["busy"] = False
             runtime["last_analysis_at"] = time.time()
+    finally:
+        if INFERENCE_LOCK.locked():
+            INFERENCE_LOCK.release()
+        runtime.update(busy=False, busy_task=None, busy_since=None)
 
 
 def signature(state):
@@ -172,6 +223,8 @@ async def collect_windows_once():
         reading = {"source": sensing.LIVE_SOURCE, "signal": "unknown", "idle_seconds": None,
                    "locked": None, "observed_at": time.time(), "expires_at": time.time() + sensing.STALE_SECONDS,
                    "error": f"采集失败（{type(exc).__name__}）：{exc}"}
+    outcome = {"changed": False}
+
     def commit(state):
         current = state.get("local_sensor", sensing.defaults())
         if not current["enabled"] or current["generation"] != config["generation"]:
@@ -180,11 +233,16 @@ async def collect_windows_once():
         pc = next(d for d in person["devices"] if d["id"] == "pc")
         changed = any(pc.get(k) != reading.get(k) for k in ("source", "signal", "locked", "error"))
         pc.update(reading)
+        error_changed = current.get("last_error") != reading["error"]
         current["last_error"] = reading["error"]
         if changed:
             invalidate(state)
             db.trace(state, "Windows 真实信号变化", f"{person['name']} · {reading['signal']}；仅表示设备状态", "Windows API")
-    db.mutate(commit)
+        # Timestamps alone prove nothing to the UI: only structural changes get a
+        # new revision, so polling clients stop rebuilding the whole page every tick.
+        outcome["changed"] = changed or error_changed
+
+    db.mutate(commit, bump=lambda: outcome["changed"])
 
 
 async def sensor_worker():
@@ -290,8 +348,11 @@ def state_view(request: Request, x_member_id: str = Header(default="m1"), since:
     identity = {"member_id": x_member_id, "local_demo": request.state.local_demo,
                 "seat": getattr(request.state, "seat", False)}
     if since is not None and since == raw["revision"]:
+        # Unchanged structure still carries live device freshness and busy state,
+        # so the client can update labels without rebuilding the page.
         return {"unchanged": True, "revision": raw["revision"], "server_time": time.time(),
                 "runtime": {k: v for k, v in runtime.items() if k != "last_signature"},
+                "live": live_view(raw),
                 "identity": identity}
     state = sensing.prepare(raw)
     if state["analysis"] and state["analysis"].get("context_key") != sensing.analysis_key(state):
@@ -354,11 +415,10 @@ def add_demand(body: DemandInput, x_member_id: str = Header(default="m1")):
 
 @app.post("/api/proposals/generate")
 async def generate_proposal():
-    if INFERENCE_LOCK.locked():
-        raise HTTPException(409, "已有模型任务进行中，请稍候")
-    async with INFERENCE_LOCK:
+    await acquire_inference()
+    try:
         snapshot = db.read()
-        runtime.update(busy=True, error=None)
+        runtime.update(busy=True, busy_task="proposal", busy_since=time.time(), error=None)
         try:
             output = await engine.generate(snapshot)
             clause_ids = [c.id for c in output.clauses]
@@ -379,6 +439,10 @@ async def generate_proposal():
             raise HTTPException(502, str(exc)) from exc
         finally:
             runtime["busy"] = False
+    finally:
+        if INFERENCE_LOCK.locked():
+            INFERENCE_LOCK.release()
+        runtime.update(busy=False, busy_task=None, busy_since=None)
 
 
 class EditProposal(BaseModel):
@@ -785,7 +849,9 @@ def backup_now(request: Request):
 
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "static" / "index.html")
+    # Revalidate every load: the desktop window keeps its own HTTP cache, and a
+    # stale index.html would hide static asset updates (scripts, styles).
+    return FileResponse(ROOT / "static" / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/downloads/soulband.apk",include_in_schema=False)
@@ -796,4 +862,13 @@ def download_android():
     return FileResponse(apk,media_type="application/vnd.android.package-archive",filename=apk.name)
 
 
-app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+class NoCacheStaticFiles(StaticFiles):
+    """Always revalidate: the embedded window caches aggressively by URL."""
+
+    def file_response(self, *args, **kwargs) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", NoCacheStaticFiles(directory=ROOT / "static"), name="static")

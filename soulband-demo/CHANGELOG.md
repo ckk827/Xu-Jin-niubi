@@ -1,3 +1,22 @@
+# 2026-11-10 · 下拉框改为页面内列表
+
+- 修复内嵌窗口里点开下拉框出现「不断变大的白框」：同一页面在有头 Edge 中弹层为 102×98 的正常尺寸，只有 Qt WebEngine 6.10.3 的窗口把原生 `<select>` 弹层画成从控件底部延伸到窗口底部的白色面板。页面样式（`style.css`、`model_settings.css`）与 DPI/缩放设置均排查过，无相关规则。
+- 新增 `static/select_menu.js` + `static/select_menu.css`：改由页面自己画选项列表（`#select-menu`，`position:fixed`、按控件定位、空间不足时向上展开、超出视口时夹回），支持鼠标点选、方向键/Home/End 高亮、Enter/Space 选中、Esc 关闭并回焦，点击外部、滚动、缩放、窗口失焦时收起。
+- 关键一步：只对 `mousedown` 调 `preventDefault()` 在内嵌窗口里不够——弹层由 Qt 的窗口层绘制，页面拦不住，白框照旧。改为让 `<select>` 自身 `pointer-events:none`（`.select-menu-ready`），点击落在父元素上，由脚本按点击坐标找到命中的下拉框再打开自绘列表；包住下拉框的 `<label>` 会转发点击，所以 `click` 也一并拦下。重绘产生的新下拉框由 `MutationObserver` 补标记。
+- `<select>` 元素本身保留在 DOM（id、name、value、change 事件全部不变），因此既有表单逻辑、`workflows.js` 与 Playwright 的 `select_option()` 都不需要改动；只在值变化时派发冒泡的 `input` + `change`。
+- 下拉打开期间（`document.body.dataset.selectMenuOpen`）暂停整页重绘与延迟重绘，避免把触发下拉的元素换掉、菜单跟着丢。
+- 静态资源改为 `Cache-Control: no-cache`（`/` 与 `/static/*`，ETag 仍生效）：内嵌窗口的 HTTP 缓存不设此头会继续用旧脚本，重启也看不到更新。
+- 验证：后端 109 项测试通过；`tests/check_ui.py` 9 项通过；有头 Edge 实测身份下拉、成员卡片里的信号下拉、首次设置的「模型来源」下拉均弹出页面内列表，`EnumWindows` 确认不再出现任何新的原生弹层窗口，`select_option('m4')` 仍能切换身份；Qt 内嵌窗口用真实受信任点击（`QTest.mouseClick` 打到渲染控件）验证：身份下拉弹出 4 项、`selectMenuOpen=1`、新增弹层窗口数为 0。
+
+# 2026-11-10 · 页面卡顿与重复点击修复
+
+- 设备采样不再每次写库都推进 `revision`：`storage.mutate(fn, bump=...)` 支持按结构变化决定是否加版本，`collect_windows_once` 只在来源/信号/锁屏/错误真的变化时才推进，避免前端每 3 秒整页重建。
+- `/api/state?since=` 的 `unchanged` 分支回填 `live`（各设备当前信号、空闲秒数、过期与错误）和 `runtime`，前端就地更新设备标签与忙碌条，结构不变时不再重建 DOM。
+- 前端把整页替换拆成 `render()`（保存/恢复滚动位置、焦点与光标选区）与 `paint()`；按住鼠标（`pointerdown` 到 `pointerup` 后约 250ms）期间不重绘，修复 mousedown 与 mouseup 之间节点被替换导致点击不触发、需要连点的问题。
+- 模型任务改为排队：`acquire_inference()` 最多等待 90 秒获取推理锁，超时才返回 409，并写明「宿主正在判断寝室状态并安排提醒（已 N 秒）」，不再立刻拒绝。
+- 公约页与概览页显示忙碌提示条，生成/判断按钮在宿主忙碌时禁用并改文案；重复点击时提示「上一个操作还在处理」，不再静默忽略。
+- 验证：后端 109 项测试通过；`tests/check_ui.py` 9 项（含四身份审核流程、无 JavaScript 报错）通过。实测开启 Windows 真实采集后 16 秒内 revision 保持 3 不变（修复前每 3 秒 +1），每次轮询仍能拿到最新空闲秒数。
+
 # 2026-11-09 · Windows 内嵌窗口启动
 
 - 正常桌面启动恢复默认图形渲染，不再强制软件 OpenGL 或禁用 GPU；原生窗口检查确认使用 RTX 4060 / Direct3D11，保持沙箱开启。

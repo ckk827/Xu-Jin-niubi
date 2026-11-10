@@ -1,0 +1,44 @@
+/* Dropdown list drawn by select_menu.js instead of Chromium's native popup. */
+
+/* The select keeps its native look but never becomes the pointer target:
+   in the embedded Qt window the popup is drawn by the widget layer, so a
+   preventDefault() in the page cannot stop it. select_menu.js opens the list
+   from the mousedown coordinates instead. */
+select.select-menu-ready { pointer-events: none; }
+
+.select-menu {
+  position: fixed;
+  z-index: 120;
+  min-width: 150px;
+  max-height: min(340px, 62vh);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid #e6dff0;
+  border-radius: 12px;
+  box-shadow: 0 18px 44px #3a2d4b2e;
+}
+.select-menu-item {
+  border: 0;
+  background: none;
+  display: block;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+  color: #4d4458;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.select-menu-item:hover,
+.select-menu-item.is-highlighted { background: #f4effb; }
+.select-menu-item.is-checked { color: var(--purple, #7660ce); font-weight: 600; background: #f8f4fe; }
+.select-menu-item:focus-visible { outline: 2px solid #b5a3ef; outline-offset: -2px; }

@@ -127,11 +127,19 @@ def read() -> dict:
         return _load(conn)
 
 
-def mutate(fn):
+def mutate(fn, bump=True):
+    """Apply ``fn`` to the stored state and persist it.
+
+    ``bump`` may be a bool or a zero-argument callable evaluated *after* ``fn``
+    ran. Device sampling rewrites timestamps every few seconds; those writes
+    must reach disk without a new revision, otherwise every client poll sees a
+    "changed" state and rebuilds the whole page (which also swallows clicks).
+    """
     with LOCK, connection() as conn:
         state = _load(conn)
         result = fn(state)
-        state["revision"] += 1
+        if bump() if callable(bump) else bump:
+            state["revision"] += 1
         conn.execute("UPDATE app_state SET value=? WHERE id=1", (json.dumps(state, ensure_ascii=False),))
         return copy.deepcopy(result)
 

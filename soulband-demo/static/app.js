@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 const icons = {
   home:'<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z"/><path d="M9 21v-8h6v8"/>',
   grid:'<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
@@ -30,16 +30,18 @@ const icons = {
 const icon = (name, size=19) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.info}</svg>`;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const pages = {overview:['寝室概览','grid'], models:['模型连接','spark'], agreement:['诉求与公约','chat'], affairs:['公共事务','tasks'], workflows:['协商与工具','chat'], private:['私密沟通','heart'], settings:['演示与设置','settings']};
-const ui = {page:'overview', member:localStorage.getItem('soulband-member') || 'm1', state:null, busy:false, demand:'', privateText:'', privateStyle:'gentle', privateReply:'', proposal:null, inbox:false, error:null};
+const ui = {page:'overview', member:localStorage.getItem('soulband-member') || 'm1', state:null, busy:false, busyLabel:'', demand:'', privateText:'', privateStyle:'gentle', privateReply:'', proposal:null, inbox:false, error:null};
 const deviceType = new URLSearchParams(location.search).get('device') === 'phone' ? 'phone' : 'pc';
 let toastTimer, pollInFlight=false, seenNotifications=new Set();
+// A full re-render between mousedown and mouseup cancels the browser's click, which
+// looked like "the button needs several clicks". Defer paints while a press is open.
+let pointerActive=false, pendingPaint=false, flushTimer;
 
 function formatIdle(seconds){if(seconds===null||seconds===undefined)return '不可用';const n=Math.floor(seconds);return n<60?n+' 秒':Math.floor(n/60)+' 分 '+n%60+' 秒';}
 function sensorBanner(){const cfg=ui.state.local_sensor;const owner=cfg?.member_id?person(cfg.member_id):null;return `<div class="sensor-banner"><div>${icon('pc',17)}<span><strong>${cfg?.enabled?'Windows 真实采集中 · '+esc(owner.name):'Windows 真实感知已接入'}</strong><small>${cfg?.enabled?'采集的是宿主机这台电脑；手机需安装并配对原生 APK，其他未接入设备为模拟。':'到设置绑定本机和成员后开始采集，未开启前仍使用模拟信号。'}</small></span></div>${button('设备感知设置','to-settings','small secondary','settings')}</div>`;}
 function deviceControl(m,d){
   if(['windows_live','android_live'].includes(d.source)){
-    const labels={active:'近期有操作',idle:'持续无操作',away:'暂未操作',unknown:d.stale?'已过期 / 已暂停':'未知'};
-    return `<div class="device-control live-device" title="${esc(d.error||'原生设备信号')}">${icon(d.id,12)}<span>${labels[d.signal]}</span><b>实测</b></div>`;
+    return `<div class="device-control live-device" data-live-device="${m.id}:${d.id}" title="${esc(d.error||'原生设备信号')}">${icon(d.id,12)}<span data-live-label>${liveSignalLabel(d)}</span><b>实测</b></div>`;
   }
   return `<label class="device-control" title="${esc(m.name)} ${d.label} 模拟信号">${icon(d.id,12)}<select aria-label="${esc(m.name)} ${d.label} 模拟信号" data-signal-member="${m.id}" data-device="${d.id}">${[['active','活动'],['idle','无操作'],['unknown','未知']].map(([v,l])=>`<option value="${v}" ${d.signal===v?'selected':''}>${l}</option>`).join('')}</select><span class="sim-label">模拟</span></label>`;
 }
@@ -51,7 +53,7 @@ function mobilePanel(){
   return `<section class="card panel mobile-panel"><div class="panel-title">${icon('phone',17)}原生 Android 配对与采集<span class="tag ${paired?'green':'gray'}">${paired?'手机已配对':'待配对'}</span></div><p class="panel-sub">先启动局域网联调服务，将 APK 安装到 Android 手机；为当前成员生成一次性配对码，在手机填写宿主局域网地址和配对码。</p><div class="sensor-actions">${button('为'+esc(me().name)+'生成手机配对码','mobile-code','','phone',disabled?'disabled data-fixed-disabled="true"':'')}${button('解除当前成员手机配对','mobile-revoke','secondary','',!paired||disabled?'disabled data-fixed-disabled="true"':'')}${button('当前身份手机切回模拟','simulate-phone','ghost small','',paired?'disabled data-fixed-disabled="true"':'')}</div>${code?`<div class="sensor-reading"><strong>一次性配对码：<code class="pairing-code">${esc(code.code)}</code></strong><p>仅用于 ${esc(me().name)}，5 分钟内有效。请勿把配对码发给无关人员。</p></div>`:''}${phone.source==='android_live'?`<div class="sensor-reading"><strong>Android 原生来源 · ${phone.stale?'暂停 / 数据过期':'近期有采样'}</strong><p>${esc(phone.error||'锁屏：'+(phone.locked?'是':'否')+' · 屏幕交互态：'+(phone.interactive?'亮屏':'熄屏'))}</p></div>`:''}<div class="panel-tip">原生 APK 支持授权、前台采集服务、状态上报和系统提醒。使用情况权限或数据不可用时报告未知；单纯亮屏不认定有明确操作。15 秒尝试上报，90 秒无有效数据转未知；省电机制可能延迟上报。手机收到通知还需开启系统通知权限并在通知偏好中选择手机或两端。</div></section>`;
 }
 function sensorDetails(m){
-  return m.devices.filter(d=>['windows_live','android_live'].includes(d.source)).map(d=>`<div class="sensor-details">${d.id==='pc'?'电脑':'手机'}实测：${d.stale?'暂停或数据过期':d.error?esc(d.error):`无操作 ${formatIdle(d.idle_seconds)} · ${d.locked===true?'已锁屏':d.locked===false?'未锁屏':'锁屏未知'}`}<br><span>来源：${d.id==='pc'?'Windows API':'Android 原生 APK'}</span></div>`).join('');
+  return m.devices.filter(d=>['windows_live','android_live'].includes(d.source)).map(d=>`<div class="sensor-details" data-live-idle="${m.id}:${d.id}">${d.id==='pc'?'电脑':'手机'}实测：${liveDetailText(d)}<br><span>来源：${d.id==='pc'?'Windows API':'Android 原生 APK'}</span></div>`).join('');
 }
 function sensingPanel(){
   const cfg=ui.state.local_sensor;const owner=cfg.member_id?person(cfg.member_id):null;const pc=owner?.devices.find(d=>d.id==='pc');
@@ -81,6 +83,61 @@ function empty(text,name='leaf'){return `<div class="empty">${icon(name,27)}${te
 function button(text,action,kind='',name='',attrs=''){return `<button type="button" class="btn ${kind}" data-action="${action}" ${attrs} ${ui.busy?'disabled':''}>${name?icon(name,15):''}${text}</button>`;}
 function go(page){ui.page=page;ui.inbox=false;render();window.scrollTo({top:0,behavior:'smooth'});}
 
+const busyLabels={analysis:'判断寝室状态并安排提醒',proposal:'综合需求生成公约草案'};
+function busyBarText(runtime){
+  if(!runtime?.busy)return '';
+  return '宿主正在'+(busyLabels[runtime.busy_task]||'处理模型任务')+'，页面可以继续浏览；模型返回后按钮会自动恢复。';
+}
+function updateRuntimeBar(){
+  const text=busyBarText(ui.state?.runtime);
+  let bar=document.getElementById('runtime-busy');
+  if(!text){if(bar)bar.remove();return;}
+  if(!bar){
+    const content=document.querySelector('.content');
+    if(!content)return;
+    bar=document.createElement('div');bar.id='runtime-busy';bar.className='model-state';
+    bar.setAttribute('role','status');content.prepend(bar);
+  }
+  if(bar.dataset.text!==text){bar.dataset.text=text;bar.innerHTML=`<i class="spinner"></i>${esc(text)}`;}
+}
+function showActionBusy(text){
+  if(!text)return;
+  const content=document.querySelector('.content');if(!content)return;
+  let bar=document.getElementById('action-busy');
+  if(!bar){
+    bar=document.createElement('div');bar.id='action-busy';bar.className='model-state';
+    bar.setAttribute('role','status');content.prepend(bar);
+  }
+  bar.innerHTML=`<i class="spinner"></i>${esc(text)}`;
+}
+function hideActionBusy(){document.getElementById('action-busy')?.remove();}
+function liveSignalLabel(d){
+  if(d.stale)return '已过期 / 已暂停';
+  return ({active:'近期有操作',idle:'持续无操作',away:'暂未操作',unknown:'未知'})[d.signal]||'未知';
+}
+function liveDetailText(d){
+  if(d.stale)return '暂停或数据过期';
+  if(d.error)return esc(d.error);
+  return `无操作 ${formatIdle(d.idle_seconds)} · ${d.locked===true?'已锁屏':d.locked===false?'未锁屏':'锁屏未知'}`;
+}
+// Poll replies stay "unchanged" for device timestamps only; patch those labels in
+// place so the page does not have to be rebuilt every three seconds.
+function applyLive(live){
+  if(!live)return;
+  for(const d of live.devices||[]){
+    const key=d.member_id+':'+d.device_id;
+    document.querySelectorAll(`[data-live-device="${key}"] [data-live-label]`).forEach(el=>{
+      const text=liveSignalLabel(d);if(el.textContent!==text)el.textContent=text;
+    });
+    document.querySelectorAll(`[data-live-idle="${key}"]`).forEach(el=>{
+      const text=`${d.device_id==='pc'?'电脑':'手机'}实测：${liveDetailText(d)}<br><span>来源：${d.device_id==='pc'?'Windows API':'Android 原生 APK'}</span>`;
+      if(el.dataset.text!==text){el.dataset.text=text;el.innerHTML=text;}
+    });
+  }
+  if(ui.state&&live.runtime)ui.state.runtime={...(ui.state.runtime||{}),...live.runtime};
+  updateRuntimeBar();
+}
+
 async function refresh(force=true){
   const previous=ui.state?.revision;
   const previousConnection=JSON.stringify([ui.state?.mode,ui.state?.model,ui.state?.api_base_url,ui.state?.api_key_saved,ui.state?.identity?.local_demo]);
@@ -90,7 +147,11 @@ async function refresh(force=true){
   document.getElementById('connection-error')?.remove();
   ui.error=null;
   if(received.unchanged){
-    if(ui.state){ui.state.runtime=received.runtime;if(received.identity)ui.state.identity={...ui.state.identity,...received.identity};}
+    if(ui.state){
+      ui.state.runtime=received.runtime;
+      if(received.identity)ui.state.identity={...ui.state.identity,...received.identity};
+      applyLive(received.live);
+    }
     return;
   }
   if(role!==ui.member)return;
@@ -107,18 +168,40 @@ async function refresh(force=true){
   const typing=['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName);
   const changedView=previousView!==JSON.stringify([ui.state.clock,ui.state.members,ui.state.analysis?.context_key,ui.state.local_sensor]);
   if(force || previous!==ui.state.revision || changedView || ui.state.runtime.busy){
-    if(force || (!typing&&!document.getElementById('modal').open&&!ui.busy))render();
+    if(pointerActive||(!force&&(typing||document.getElementById('modal').open||ui.busy||document.body.dataset.selectMenuOpen))){
+      // Repaint as soon as the press/caret/modal/busy state clears instead of throwing
+      // the update away; otherwise a slow tick could freeze the page visibly.
+      pendingPaint=true;
+    }else{
+      pendingPaint=false;
+      render();
+    }
+  }else{
+    applyLive(received.live);
   }
 }
-async function act(fn, success){
-  if(ui.busy)return;
+async function act(fn, success, busyText){
+  if(ui.busy){toast('上一个操作还在处理，请等它结束再点；按钮会自动恢复。');return;}
   ui.busy=true;
   document.querySelectorAll('button[data-action]').forEach(b=>b.disabled=true);
   document.body.setAttribute('aria-busy','true');
-  try{const result=await fn();ui.busy=false;await refresh();if(success)toast(typeof success==='function'?success(result):success);return result;}
-  catch(error){ui.busy=false;toast(error.message);try{await refresh();}catch{ui.error=error.message;render();}}
-  finally{ui.busy=false;document.body.removeAttribute('aria-busy');document.querySelectorAll('button[data-action]').forEach(b=>{if(b.dataset.fixedDisabled!=='true')b.disabled=false;});}
+  showActionBusy(busyText);
+  try{const result=await fn();ui.busy=false;hideActionBusy();await refresh();if(success)toast(typeof success==='function'?success(result):success);return result;}
+  catch(error){ui.busy=false;hideActionBusy();toast(error.message);try{await refresh();}catch{ui.error=error.message;render();}}
+  finally{ui.busy=false;hideActionBusy();document.body.removeAttribute('aria-busy');document.querySelectorAll('button[data-action]').forEach(b=>{if(b.dataset.fixedDisabled!=='true')b.disabled=false;});}
 }
+
+document.addEventListener('pointerdown',()=>{pointerActive=true;},{passive:true});
+function flushPendingPaint(){
+  pointerActive=false;pendingPaint=false;
+  if(!ui.busy&&!document.body.dataset.selectMenuOpen)render();
+}
+['pointerup','pointercancel'].forEach(name=>document.addEventListener(name,()=>{
+  // The click event is dispatched right after pointerup; painting synchronously here
+  // would replace the node before the browser sends the click.
+  clearTimeout(flushTimer);
+  flushTimer=setTimeout(()=>{if(pendingPaint)flushPendingPaint();else pointerActive=false;},250);
+},{passive:true}));
 
 const illustration = `<svg class="hero-art" viewBox="0 0 300 240" fill="none" aria-hidden="true">
 <ellipse cx="157" cy="198" rx="101" ry="17" fill="#d9cfe9" opacity=".4"/>
@@ -140,6 +223,27 @@ const illustration = `<svg class="hero-art" viewBox="0 0 300 240" fill="none" ar
 </svg>`;
 
 function render(){
+  // Rebuilding innerHTML is the only way this page paints, so keep the parts of
+  // the view the user is holding on to: scroll position, focus and text caret.
+  const scroller=document.querySelector('.content');
+  const scroll=scroller?scroller.scrollTop:0;
+  const pageY=window.scrollY;
+  const focused=document.activeElement;
+  const focusId=focused&&focused.id&&focused!==document.body?focused.id:null;
+  const selection=focusId&&typeof focused.selectionStart==='number'?[focused.selectionStart,focused.selectionEnd]:null;
+  paint();
+  const again=document.querySelector('.content');
+  if(again&&scroll)again.scrollTop=scroll;
+  if(Math.abs(window.scrollY-pageY)>1)window.scrollTo({top:pageY});
+  if(focusId){
+    const el=document.getElementById(focusId);
+    if(el&&el!==document.activeElement){
+      try{el.focus({preventScroll:true});if(selection&&typeof el.setSelectionRange==='function')el.setSelectionRange(selection[0],selection[1]);}catch{}
+    }
+  }
+}
+
+function paint(){
   if(!ui.state){document.getElementById('app').innerHTML=`<div class="boot">${esc(ui.error||'正在连接寝室…')}<br><br><button class="btn" onclick="location.reload()">重新连接</button></div>`;return;}
   if(ui.state.mode==='unconfigured'){document.getElementById('app').innerHTML=modelSetupPage();return;}
   const current=me();const unread=ui.state.reminders.filter(n=>!n.read).length;
@@ -153,6 +257,7 @@ function render(){
   ${ui.inbox?inboxPage():({overview:overviewPage,models:modelsPage,agreement:agreementPage,affairs:affairsPage,workflows:workflowPage,private:privatePage,settings:settingsPage}[ui.page])()}
   <footer class="footer"><span>SOULBAND · 把各自的诉求，变成共同的约定</span><span>可测试版本 v0.5 · ${deviceType==='phone'?'手机适配入口':'桌面入口'} · 支持同机四座位并行演示</span></footer></div></main></div>`;
   if(!ui.state.identity?.local_demo){const picker=document.getElementById('identity-select');picker.disabled=true;picker.options.length=0;picker.add(new Option(current.name+(ui.state.identity?.seat?' · 同机座位':' · 已配对'),current.id));}
+  updateRuntimeBar();
 }
 
 function heading(eyebrow,title,sub,action=''){return `<div class="page-heading"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${sub}</p></div>${action||modeTag()}</div>`;}
@@ -163,7 +268,6 @@ function overviewPage(){
   <div class="section-title"><h2>${icon('users',17)}伙伴此刻</h2><small>${ui.state.clock.mode==='real'?'实际时间':'模拟时间'} ${esc(ui.state.clock.time)} · ${ui.state.members.length} 人</small></div>
   <div class="members">${ui.state.members.map(memberCard).join('')}</div><div class="member-footer"><span class="fineprint">实测与模拟来源分别标注。设备状态不代表真实睡眠或噪声。</span>${button('纠正我的状态','manual','small ghost','edit')}</div>
   ${a?`<div class="panel-tip"><strong>${icon('spark',12)} ${esc(a.source)} · ${a.elapsed}s</strong><br>${esc(a.summary)}${a.blocked.length?'<br>程序拦截：'+esc(a.blocked.join('；')):''}</div>`:''}
-  ${ui.state.runtime.busy?'<div class="model-state"><i class="spinner"></i>正在综合公约与状态，请稍候…</div>':''}
   <div class="lower-grid"><section><div class="section-title"><h2>${icon('tasks',16)}一起完成的小事</h2><button class="text-button" data-action="to-affairs">${completed}/${ui.state.tasks.length} 已完成 ${icon('chevron',12)}</button></div><div class="card panel">${taskLines()}</div></section><section><div class="section-title"><h2>${icon('clock',16)}寝室动态</h2><button class="text-button" data-action="to-settings">查看记录 ${icon('chevron',12)}</button></div><div class="card panel">${events(3)}</div></section></div></div>
   <div class="right-col"><section class="card panel"><div class="panel-title">${icon('shield',17)} 我们的共同公约 <span class="tag ${active()?'green':'amber'}">${active()?'已生效':'待共建'}</span></div><p class="panel-sub">每一条约定，都来自大家的需要。</p>${proposal?`<div class="covenant-preview">${proposal.clauses.slice(0,3).map((c,i)=>`<div class="clause-mini"><div class="clause-num">0${i+1}</div><div><h4>${esc(c.title)}</h4><p>${esc(c.text.length>65?c.text.slice(0,65)+'…':c.text)}</p></div></div>`).join('')}</div>${approvalDots(proposal)}`:`${empty('四份诉求已准备好<br>让它们变成第一版共同公约','chat')}`} ${button(proposal?'查看公约与审核':'整理第一版公约','to-agreement','full-width ghost','arrow')}<div class="panel-tip"><strong>小约定，大安心</strong><br>只有经过人工审核的公约，才会成为主动提醒的依据。</div></section>
   <section class="card panel"><div class="panel-title">${icon('heart',17)} 有点在意，不必憋着</div><p class="panel-sub">先整理自己的感受，再决定怎么开口。</p>${button('和宿伴私下说说','to-private','full-width secondary','lock')}<p class="fineprint" style="margin-top:12px">私密输入不保存，也不会自动发给室友。</p></section>
@@ -185,6 +289,7 @@ function agreementPage(){
   let p=ui.state.proposals.find(p=>p.id===ui.proposal)||latest();
   const isLatest=p&&p.id===latest()?.id;const isActive=p?.id===ui.state.active_id;
   const disabled=p&&(!isLatest||p.approvals.includes(ui.member)||p.conflicts.length||isActive);
+  const modelBusy=Boolean(ui.state.runtime?.busy);
   return heading('SAY IT, SHAPE IT, SHARE IT','每份需要，都值得被听见','先收集诉求，再由大家一起审核共同公约。')+
   `<div class="notice">${icon('info',14)} 当前可切换四个演示身份，分别提交和审核。本机演示模式可以切换身份；局域网成员必须单独配对，授权后不能切换他人身份。</div>
   <div class="two-col"><section class="card panel"><div class="panel-title">${icon('chat',17)} 大家的诉求 <span class="tag">${ui.state.demands.length} 条公开需求</span></div>${ui.state.demands.map(d=>`<article class="demand-card"><div class="demand-head">${avatar(person(d.member_id))}<strong>${esc(person(d.member_id).name)}</strong><span class="tag gray">${d.visibility==='private'?'仅本人保存':'寝室公开'}</span></div><p>${esc(d.text)}</p></article>`).join('')}
@@ -193,7 +298,7 @@ function agreementPage(){
   ${ui.state.proposals.length?`<div class="version-tabs">${ui.state.proposals.map(v=>`<button type="button" data-action="select-proposal" data-id="${v.id}" class="${p?.id===v.id?'selected':''}">v${v.version}${v.id===ui.state.active_id?' · 生效':''}</button>`).join('')}</div>`:''}
   ${p?`<h3 style="font-size:15px;font-weight:550;margin-bottom:15px">${esc(p.title)}</h3>${p.conflicts.length?`<div class="conflict">待协商，暂不能确认：<br>${p.conflicts.map(esc).join('<br>')}</div>`:''}${p.clauses.map((c,i)=>`<div class="clause-block"><h3><span class="clause-num">${String(i+1).padStart(2,'0')}</span>${esc(c.title)}</h3><p>${esc(c.text)}</p>${c.kind==='quiet'?`<small>${icon('moon',12)} 提醒适用时段：${esc(c.start)} — ${esc(c.end)}<br>${esc(scopeLabel(c))}</small>`:''}<small>来源：${c.sources.map(esc).join('、')||'人工补充，待审核'}</small></div>`).join('')}
   <div class="approval-list">${ui.state.members.map(m=>`<span class="approval ${p.approvals.includes(m.id)?'done':''}">${p.approvals.includes(m.id)?icon('check',12):icon('clock',12)}${esc(m.name)} · ${p.approvals.includes(m.id)?'已确认':'待审核'}</span>`).join('')}</div><div class="form-footer">${button('修改为新版本','revise','secondary small','edit',`data-id="${p.id}" ${!isLatest?'disabled data-fixed-disabled="true"':''}`)}<button type="button" class="btn" data-action="approve" data-id="${p.id}" ${disabled?'disabled data-fixed-disabled="true"':''}>${icon('check',15)}${isActive?'已全员确认生效':p.approvals.includes(ui.member)?'你已确认此版本':'以'+esc(me().name)+'身份确认'}</button></div><p class="fineprint" style="margin-top:14px">修改会生成新版本，旧确认不沿用。全员确认前不会产生有效公共规则。</p>`:empty('先看看左边四位伙伴的需要<br>再生成可审核的共同公约','users')}
-  <div style="margin-top:20px">${button(p?'重新综合需求生成草案':'综合需求，生成公约草案','generate','full-width ghost','spark')}</div></section>
+  <div style="margin-top:20px">${button(modelBusy?'模型正在自动判断，稍候再生成':(p?'重新综合需求生成草案':'综合需求，生成公约草案'),'generate','full-width ghost','spark',modelBusy?'disabled data-fixed-disabled="true"':'')}</div></section>
   <section class="card panel"><div class="panel-title">${icon('heart',17)} 执行反馈与再次协商</div><p class="panel-sub">反馈关联当前静音公约。只表达具体诉求，不判断谁对谁错。</p><div class="feedback-controls"><select id="feedback-target" aria-label="反馈相关成员">${ui.state.members.filter(m=>m.id!==ui.member).map(m=>`<option value="${m.id}" ${m.id==='m2'?'selected':''}>涉及 ${esc(m.name)}</option>`).join('')}</select>${button('已改善','feedback-improved','small secondary','check')}${button('仍希望安静','feedback-still','small ghost','moon')}</div>${ui.state.negotiations.map(n=>`<div class="panel-tip"><strong>${esc(n.title)}</strong><br>关联 v${n.version} · ${esc(n.status)}<br>请相关成员讨论后修订公约，系统不再追加催促。</div>`).join('')}</section></div></div>`;
 }
 
@@ -238,9 +343,9 @@ document.addEventListener('click',async event=>{
   if(action==='simulate-pc')return act(()=>api('/devices/'+ui.member+'/pc','PUT',{signal:'unknown'}),'当前身份的电脑已切回模拟，请在概览页选择信号。');
   if(action==='revise')return reviseModal(b.dataset.id);
   if(action==='select-proposal'){ui.proposal=b.dataset.id;render();return;}
-  if(action==='generate')return act(async()=>{const p=await api('/proposals/generate','POST');ui.proposal=p.id;return p;},'草案已生成，请逐条核对并分别审核。');
+  if(action==='generate')return act(async()=>{const p=await api('/proposals/generate','POST');ui.proposal=p.id;return p;},'草案已生成，请逐条核对并分别审核。','正在请求模型综合大家的诉求，最多约两分钟；页面会显示进度，请不要重复点击。');
   if(action==='approve')return act(()=>api('/proposals/'+b.dataset.id+'/approve','POST'),'已确认此版本；全员确认后才会生效。');
-  if(action==='analyze')return act(()=>api('/analyze','POST'),'判断已完成。请查看状态、依据和提醒收件箱。');
+  if(action==='analyze')return act(()=>api('/analyze','POST'),'判断已完成。请查看状态、依据和提醒收件箱。','正在请求模型判断寝室状态，最多约两分钟；请不要重复点击。');
   if(action==='toggle-task')return act(()=>api('/tasks/'+b.dataset.id+'/toggle','POST'),'任务状态已同步。');
   if(action==='read')return act(()=>api('/reminders/'+b.dataset.id+'/read','POST'),'已标记为已读。');
   if(action==='notify-preference')return act(()=>api('/notification-preference','PUT',{strategy:b.dataset.value}),'通知偏好已保存。');
